@@ -1,5 +1,15 @@
 # 验证记录
 
+## 0.4.2 GitHub 首次发布
+
+验证日期：2026-10-05。
+
+- 源码、Windows 免安装运行文件与 `v0.4.2` 标签已推送到 `2274168514/AutoDL-Aoao`；发布范围检查未发现个人配置或凭据，`dist`、`build` 与本地配置不提交。
+- Windows/macOS/Linux、Python 3.10/3.14 的六项安装与配置检查通过：[检查记录](https://github.com/2274168514/AutoDL-Aoao/actions/runs/37301705519)。
+- Windows x64、macOS arm64、macOS x64 的原生构建、版本匹配、压缩包完整性及用户数据排除检查通过。Mac 额外检查应用结构、签名完整性和架构；未进行真实账号、GPU 开机或邮件发送操作。
+- 首次构建后的 `lipo` 参数顺序错误已在发布工作流修正；保留原始标签，使用该标签源码重新构建并成功发布：[发布记录](https://github.com/2274168514/AutoDL-Aoao/actions/runs/37302168604)。
+- [Release](https://github.com/2274168514/AutoDL-Aoao/releases/tag/v0.4.2) 提供三个桌面 ZIP 和源码 ZIP。Mac 仅有 ad-hoc 签名，没有 Developer ID 或 Apple 公证；用户环境中的图形交互与真实账号行为仍需本地确认。
+
 ## 0.4.2 自动开机邮件文案
 
 验证日期：2026-10-05。
