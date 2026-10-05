@@ -1,0 +1,158 @@
+name: Build and release desktop clients
+
+# Manual runs only build artifacts; a version tag publishes the complete release.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.platform }} / ${{ matrix.architecture }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            architecture: x64
+          - os: macos-15
+            platform: macos
+            architecture: arm64
+            macho: arm64
+          - os: macos-15-intel
+            platform: macos
+            architecture: x64
+            macho: x86_64
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.architecture }}
+
+      - name: Verify version and native Python architecture
+        shell: python
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
+        run: |
+          import os
+          import runpy
+          build = runpy.run_path('tools/build_desktop.py')
+          assert build['_platform_label']()[1] == os.environ['EXPECTED_ARCH'], 'Python architecture does not match the runner'
+          if os.environ['GITHUB_REF_TYPE'] == 'tag':
+              assert os.environ['GITHUB_REF_NAME'] == 'v' + build['_version'](), 'Tag and source version must match'
+
+      - name: Install build dependencies
+        run: python -m pip install PyInstaller==6.18.0 ".[desktop]"
+
+      - name: Validate sample configuration without network
+        run: python run.py --config config.example.json validate
+
+      - name: Build native client and archive
+        run: python tools/build_desktop.py
+
+      - name: Verify macOS app structure, signature and architecture
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACHO_ARCH: ${{ matrix.macho }}
+        run: |
+          app='dist/desktop/AutoDL Aoao/AutoDL Aoao.app'
+          test -x "$app/Contents/MacOS/AutoDL Aoao"
+          /usr/bin/plutil -lint "$app/Contents/Info.plist"
+          /usr/bin/codesign --verify --deep --strict "$app"
+          /usr/bin/lipo -verify_arch "$MACHO_ARCH" "$app/Contents/MacOS/AutoDL Aoao"
+
+      - name: Build source ZIP once
+        if: runner.os == 'Windows'
+        run: python tools/package.py
+
+      - name: Check archive integrity and user-data exclusions
+        shell: python
+        run: |
+          from pathlib import Path, PurePosixPath
+          from zipfile import ZipFile
+          archives = list(Path('dist/desktop').glob('*.zip'))
+          assert len(archives) == 1, 'Expected one native desktop ZIP'
+          archives += list(Path('dist').glob('autodl-aoao-*.zip'))
+          private = {'profile.json', 'credentials.json', 'config.json', 'state.json', '.env', 'chrome-session', 'devtoolsactiveport'}
+          for path in archives:
+              with ZipFile(path) as archive:
+                  assert archive.testzip() is None, f'Corrupt ZIP: {path.name}'
+                  for name in archive.namelist():
+                      parts = {part.casefold() for part in PurePosixPath(name).parts}
+                      assert not parts.intersection(private) and '.autostart.' not in name.casefold(), 'User data must not be packaged'
+              print('Verified:', path.name)
+
+      - name: Upload downloadable build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: AutoDL-Aoao-${{ matrix.platform }}-${{ matrix.architecture }}
+          path: |
+            dist/desktop/*.zip
+            dist/autodl-aoao-*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    name: Publish versioned downloads
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download all native archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: AutoDL-Aoao-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # upload-artifact preserves relative paths under their common root.
+          # Collect the four ZIPs without unzipping the signed .app bundles.
+          mapfile -d '' assets < <(find release-assets -type f -name '*.zip' -print0)
+          test "${#assets[@]}" -eq 4
+          cat > release-notes.md <<'EOF'
+          下载与你的电脑对应的 ZIP，解压后运行，无需安装 Python。
+
+          - Windows：`windows-x64.zip`，运行 `AutoDL Aoao.exe`，保留同目录 `_internal`。
+          - Apple Silicon Mac（M 系列）：`macos-arm64.zip`。
+          - Intel Mac：`macos-x64.zip`。
+          - macOS：解压后打开 `AutoDL Aoao.app`，也可移到“应用程序”。
+
+          Mac 应用目前只有临时签名，尚未通过 Apple Developer ID 签名或公证。
+          首次打开若被 macOS 拦截，确认下载来源后，可在“系统设置 → 隐私与安全性”中选择“仍要打开”。
+          这些包由对应架构的 GitHub runner 原生构建；未进行真实 AutoDL 开机或邮件发送测试。
+
+          自动开机默认关闭；手动启用后，成功开机可能开始计费。
+          EOF
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "AutoDL Aoao $RELEASE_TAG" --notes-file release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          gh release edit "$RELEASE_TAG" --draft=false

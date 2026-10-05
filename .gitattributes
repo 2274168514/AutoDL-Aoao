@@ -1,0 +1,4 @@
+# Preserve the exact built files when Git checks out the portable Windows app.
+"/AutoDL Aoao.exe" -text
+/_internal/** -text
+/licenses/** -text

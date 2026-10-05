@@ -1,0 +1,30 @@
+{
+  "autodl": {
+    "token_env": "AUTODL_TOKEN",
+    "sub_account": "",
+    "app_version": ""
+  },
+  "targets": [
+    {
+      "kind": "instance",
+      "value": "替换为实例ID或完整名称",
+      "min_gpus": null
+    }
+  ],
+  "poll_seconds": 60,
+  "timeout_seconds": 20,
+  "cooldown_seconds": 300,
+  "auto_start": false,
+  "state_file": "state.json",
+  "email": {
+    "host": "smtp.163.com",
+    "port": 465,
+    "security": "ssl",
+    "sender": "yourname@163.com",
+    "recipients": [
+      "recipient@example.com"
+    ],
+    "password_env": "SMTP_PASSWORD",
+    "timeout": 20
+  }
+}

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autodl-aoao"
+version = "0.4.2"
+description = "AutoDL Aoao: lightweight cross-platform GPU availability monitor with SMTP notifications"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "Topic :: System :: Monitoring",
+]
+
+[project.optional-dependencies]
+desktop = ["websocket-client==1.9.2"]
+icons = ["Pillow>=10"]
+
+[project.scripts]
+autodl-aoao = "autodl_gpu_watch.cli:main"
+autodl-gpu-watch = "autodl_gpu_watch.cli:main"
+
+[project.gui-scripts]
+autodl-aoao-gui = "autodl_gpu_watch.gui:main"
+autodl-gpu-watch-gui = "autodl_gpu_watch.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+autodl_gpu_watch = ["assets/*.png", "assets/*.ico"]

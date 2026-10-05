@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+*.pyo
+# The root EXE and _internal/ are intentional, checked-in Windows runtime files.
+# Do not ignore *.pyd: these are required by the portable application.
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.portable-stage-*/
+.env
+.env.*
+!.env.example
+config.json
+config.local*.json
+profile.json
+credentials.json
+.profile.json.*
+.credentials.json.*
+.state*.json*.tmp
+token.txt
+token.json
+chrome-session/
+state*.json*
+*.lock
+*.log
+*.log.*
