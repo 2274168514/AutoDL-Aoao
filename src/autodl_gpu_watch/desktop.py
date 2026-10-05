@@ -14,7 +14,7 @@ import tempfile
 import threading
 from typing import Callable
 
-from .api import APIError, AuthenticationError, AutoDLClient, StartRejectedError, evaluate_target
+from .api import APIError, AuthenticationError, AutoDLClient, StartRejectedError
 from .cli import example_config
 from .config import ConfigError, parse_config
 from .monitor import InstanceLock, LockError, Monitor, StateError, StateStore
@@ -102,6 +102,24 @@ class _CancellableClient(AutoDLClient):
             raise OperationStopped()
         return result
 
+    def fetch_machines(self, machine_ids):
+        rows = []
+        for machine_id in dict.fromkeys(machine_ids):
+            if self._stop.is_set():
+                raise OperationStopped()
+            rows.extend(super().fetch_machines([machine_id]))
+            if self._stop.is_set():
+                raise OperationStopped()
+        return rows
+
+    def _fetch_machine_page(self, machine_id, page_index):
+        if self._stop.is_set():
+            raise OperationStopped()
+        result = super()._fetch_machine_page(machine_id, page_index)
+        if self._stop.is_set():
+            raise OperationStopped()
+        return result
+
     def start_instance(self, instance_uuid):
         if self._stop.is_set():
             raise StartRejectedError("已停止，尚未发送开机请求。")
@@ -132,6 +150,11 @@ class _ObservedClient:
 
     def fetch_instances(self):
         rows = self.client.fetch_instances()
+        self.emit("connection", {"state": "verified", "message": "AutoDL 连接正常"})
+        return rows
+
+    def fetch_machines(self, machine_ids):
+        rows = self.client.fetch_machines(machine_ids)
         self.emit("connection", {"state": "verified", "message": "AutoDL 连接正常"})
         return rows
 
@@ -400,9 +423,9 @@ class DesktopController:
                 raise ConfigError("当前没有可更新的监控，请等待停止完成后再修改设置")
             unchanged = replace(config, targets=previous.targets, email=replace(config.email, recipients=previous.email.recipients))
             if unchanged != previous or not self._same_credentials(candidate, self._live_profile):
-                raise ConfigError("监控中只能追加实例和修改收件人；其他设置或凭据请停止后修改")
+                raise ConfigError("监控中只能追加目标和修改收件人；其他设置或凭据请停止后修改")
             if config.targets[:len(previous.targets)] != previous.targets:
-                raise ConfigError("监控中只能追加实例，不能移除、重排或修改现有监控目标")
+                raise ConfigError("监控中只能追加目标，不能移除、重排或修改现有监控目标")
             if config == previous:
                 return
             raw = self._saved_raw(candidate)
@@ -517,9 +540,10 @@ class DesktopController:
 
         def task(stop):
             self._emit("status", "正在检查空卡…")
-            rows = _CancellableClient(token, config.autodl, config.timeout_seconds, stop).fetch_instances()
-            self._emit("connection", {"state": "verified", "message": "AutoDL 连接正常"})
-            observations = [evaluate_target(target, rows) for target in config.targets]
+            client = _ObservedClient(_CancellableClient(token, config.autodl, config.timeout_seconds, stop), self._emit)
+            watcher = Monitor(config, client, None, StateStore(config.state_file), stop_event=stop,
+                              log=lambda text: self._emit("log", text))
+            observations = watcher.check_once(notify=False)
             self._emit("observations", observations)
             self._emit("log", "检查完成。本次未发送邮件，也未更改提醒状态。")
         self._launch(profile, task)

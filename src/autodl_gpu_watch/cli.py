@@ -118,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
             EmailNotifier(config.email, require_secret(config.email.password_env)).send_test()
             print("SMTP 服务器已接受测试邮件；请检查收件箱或垃圾邮件文件夹。")
             return 0
-        from .api import AutoDLClient, evaluate_target
+        from .api import AutoDLClient
         client = AutoDLClient(require_secret(config.autodl.token_env), config.autodl, config.timeout_seconds)
         if args.command == "list":
             rows = client.fetch_instances()
@@ -128,8 +128,9 @@ def main(argv: list[str] | None = None) -> int:
                 _log(f"实例 {row.get('uuid') or row.get('instance_uuid') or '?'} | 名称 {row.get('name', '?')} | 宿主机 {row.get('machine_id', '?')} | 状态 {row.get('status', '?')} | 空闲GPU {row.get('gpu_idle_num', '?')}")
             return 0
         if args.command == "check":
-            rows = client.fetch_instances()
-            observations = [evaluate_target(target, rows) for target in config.targets]
+            from .monitor import Monitor, StateStore
+            watcher = Monitor(config, client, None, StateStore(config.state_file), log=lambda _: None)
+            observations = watcher.check_once(notify=False)
             _print_observations(observations)
             return 3 if any(item.available is None for item in observations) else 0
         from .monitor import InstanceLock, Monitor, StateStore

@@ -263,7 +263,7 @@ class DesktopApp:
         table.columnconfigure(0, weight=1)
         table.rowconfigure(0, weight=1)
         self.targets_tree = ttk.Treeview(table, columns=("name", "gpu", "status"), show="headings", height=4, selectmode="extended")
-        for key, title, width, stretch in (("name", "实例", 300, True), ("gpu", "空闲 / 需要", 105, False), ("status", "状态", 105, False)):
+        for key, title, width, stretch in (("name", "监控目标", 300, True), ("gpu", "空闲 / 需要", 105, False), ("status", "状态", 105, False)):
             self.targets_tree.heading(key, text=title, anchor="w")
             self.targets_tree.column(key, width=round(width * self._scale), minwidth=70, stretch=stretch, anchor="w")
         self.targets_tree.tag_configure("available", foreground=GREEN)
@@ -411,14 +411,20 @@ class DesktopApp:
         body = ttk.Frame(window, padding=14)
         body.pack(fill="both", expand=True)
         body.columnconfigure(1, weight=1)
-        self._track(ttk.Combobox(body, textvariable=self.vars["target_kind"], values=("实例", "机器"), state="readonly", width=7), "readonly", live=True).grid(row=0, column=0, padx=(0, 10))
+        selector = self._track(ttk.Combobox(body, textvariable=self.vars["target_kind"], values=("实例", "机器"), state="readonly", width=7), "readonly", live=True)
+        selector.grid(row=0, column=0, padx=(0, 10))
         entry = self._entry(body, "target_value", live=True)
         entry.grid(row=0, column=1, sticky="ew")
         entry.bind("<Return>", lambda event: self._add_target())
-        ttk.Label(body, text="填写完整实例名或 ID", style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 12))
+        hint_text = lambda: "填写市场主机 ID，无需先租用。" if self.vars["target_kind"].get() == "机器" else "填写完整实例名或 ID"
+        hint = ttk.Label(body, text=hint_text(), style="Muted.TLabel")
+        hint.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 12))
+        selector.bind("<<ComboboxSelected>>", lambda event: hint.configure(text=hint_text()))
         ttk.Label(body, text="需要 GPU").grid(row=2, column=0, sticky="w")
-        self._entry(body, "target_min", live=True, width=7).grid(row=2, column=1, sticky="w")
-        ttk.Label(body, text="实例可留空；机器需要填写卡数。", style="Muted.TLabel").grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 12))
+        minimum_entry = self._entry(body, "target_min", live=True, width=7)
+        minimum_entry.grid(row=2, column=1, sticky="w")
+        minimum_entry.bind("<Return>", lambda event: self._add_target())
+        ttk.Label(body, text="实例可留空；机器需填卡数，仅提醒。", style="Muted.TLabel").grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 12))
         self._button(body, "添加", self._add_target, "Accent.TButton", live=True).grid(row=4, column=1, sticky="e")
         ttk.Label(body, textvariable=self.status_var, style="Muted.TLabel", width=1).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         self._refresh_controls()
@@ -685,7 +691,7 @@ class DesktopApp:
         kind = "machine" if self.vars["target_kind"].get() == "机器" else "instance"
         minimum = str(self.vars["target_min"].get()).strip()
         if not value or any(not c.isprintable() for c in value):
-            self._operation_error = "请填写完整实例名或 ID。"
+            self._operation_error = "请填写主机 ID。" if kind == "machine" else "请填写完整实例名或 ID。"
             self._set_status(self._operation_error, True)
             return
         required = None
@@ -756,7 +762,7 @@ class DesktopApp:
                     tag = "available" if action_state == "succeeded" else "warning" if action_state in ("unknown", "blocked", "rejected") else "muted"
             self.targets_tree.insert("", "end", iid=str(i), values=(_safe_label(name), gpu, status), tags=(tag,))
         if not self._targets:
-            self.targets_tree.insert("", "end", iid="_empty", values=("尚未添加实例", "", ""), tags=("muted",))
+            self.targets_tree.insert("", "end", iid="_empty", values=("尚未添加监控目标", "", ""), tags=("muted",))
         self._refresh_connection()
         self._refresh_controls()
 

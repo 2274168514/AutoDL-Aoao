@@ -1,4 +1,4 @@
-"""AutoDL instance queries, conservative decisions, and explicit start commands.
+"""AutoDL instance/market queries, conservative decisions, and explicit starts.
 
 The endpoint is an internal web-console API, so unexpected responses are treated
 as unknown/error. Start commands never retry an uncertain outcome.
@@ -150,12 +150,17 @@ def _unique_object(pairs):
 
 
 class AutoDLClient:
-    """Query owned instances; only an explicit start_instance call can start one."""
+    """Read instances/market; only an explicit start_instance call can start one."""
 
     PAGE_SIZE = 100
     MAX_PAGES = 1000
     MAX_ROWS = 100000
     MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+    MARKET_FIELDS = (
+        "machine_id", "machine_alias", "region_name", "gpu_name",
+        "gpu_idle_num", "gpu_number", "on_line", "max_instance_num",
+        "binding_instance_num",
+    )
 
     def __init__(self, token: str, settings: AutoDLSettings, timeout: float = 20):
         if not _header_value(token) or not token.strip():
@@ -191,7 +196,10 @@ class AutoDLClient:
             "name": "",
             "sub_name": self._settings.sub_account,
         }
-        request = Request(self._endpoint, data=json.dumps(body).encode("utf-8"), headers=self._request_headers(), method="POST")
+        return self._query_readonly(self._endpoint, body, "实例")
+
+    def _query_readonly(self, endpoint: str, body: dict, subject: str) -> dict:
+        request = Request(endpoint, data=json.dumps(body).encode("utf-8"), headers=self._request_headers(), method="POST")
         try:
             with self._opener.open(request, timeout=self._timeout) as response:
                 status = response.getcode()
@@ -209,7 +217,7 @@ class AutoDLClient:
         if len(raw) > self.MAX_RESPONSE_BYTES:
             raise APIError("AutoDL 响应超过安全大小限制，本轮结果未采用。")
         try:
-            payload = json.loads(raw)
+            payload = json.loads(raw, object_pairs_hook=_unique_object)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError):
             raise APIError("AutoDL 未返回有效 JSON；登录可能失效或接口发生变化。") from None
         if not isinstance(payload, dict):
@@ -222,8 +230,78 @@ class AutoDLClient:
             if code == 429 or any(part in normalized for part in ("ratelimit", "toomanyrequest", "requesttoofrequent")):
                 raise RateLimitError()
             # Server messages can echo credentials or HTML; never expose them.
-            raise APIError("AutoDL 拒绝了实例查询；请检查登录状态、账号设置或接口变化。")
+            raise APIError(f"AutoDL 拒绝了{subject}查询；请检查登录状态、账号设置或接口变化。")
         return payload
+
+    def _fetch_machine_page(self, machine_id: str, page_index: int) -> dict:
+        # Public console sources verified 2026-10-05:
+        # service-code.30826265.js maps findAll to this read-only endpoint;
+        # index.84e0581f.js passes machine_id into findAll. Filtering idle by
+        # zero deliberately includes machines with no free cards.
+        body = {
+            "machine_id": machine_id, "charge_type": "payg",
+            "region_sign": "", "region_sign_list": [], "gpu_type_name": [],
+            "machine_tag_name": [], "gpu_idle_num": 0, "mount_net_disk": False,
+            "cpu_arch": [], "chip_corp": [], "instance_disk_size_order": "",
+            "date_range": "", "date_from": "", "date_to": "",
+            "page_index": page_index, "page_size": self.PAGE_SIZE,
+            "pay_price_order": "", "gpu_idle_type": "", "default_order": True,
+        }
+        return self._query_readonly("https://www.autodl.com/api/v1/user/machine/list", body, "市场主机")
+
+    def fetch_machines(self, machine_ids: list[str]) -> list[dict]:
+        """Query exact public-market IDs, including zero availability.
+
+        No owned instances are required. Results contain only market fields,
+        never instance identities, and must be evaluated with evaluate_machine.
+        Sub-account access is not assumed to match the main-account market.
+        Any partial, unfiltered or contradictory response fails the whole call.
+        """
+        if not isinstance(machine_ids, list) or len(machine_ids) > 100:
+            raise APIError("市场主机查询需要最多 100 个机器 ID。")
+        ids: list[str] = []
+        for machine_id in machine_ids:
+            if (not isinstance(machine_id, str) or not 0 < len(machine_id) <= 32
+                    or not machine_id.isascii() or not machine_id.isdecimal()
+                    or int(machine_id) <= 0):
+                raise APIError("机器 ID 必须是 AutoDL 市场显示的正整数编号。")
+            if machine_id not in ids:
+                ids.append(machine_id)
+        if not ids:
+            return []
+        if self._settings.sub_account:
+            raise APIError("市场主机查询暂不支持子账号设置，请使用主账号查询。")
+        result: list[dict] = []
+        for machine_id in ids:
+            rows: list[dict] = []
+            total: int | None = None
+            for page_index in range(1, self.MAX_PAGES + 1):
+                page, page_total, has_more = self._unpack(
+                    self._fetch_machine_page(machine_id, page_index), page_index, "市场主机",
+                )
+                if page_total is not None:
+                    if total is not None and total != page_total:
+                        raise APIError("AutoDL 市场分页总量发生变化，本轮结果未采用。")
+                    total = page_total
+                    if total > self.MAX_ROWS:
+                        raise APIError("AutoDL 市场分页超过安全上限，本轮结果未采用。")
+                if any(_identifier(row.get("machine_id")) != machine_id for row in page):
+                    raise APIError("AutoDL 市场未返回精确匹配的机器 ID，本轮结果未采用。")
+                rows.extend(page)
+                if len(rows) > 1:
+                    raise APIError("AutoDL 市场返回重复主机记录，无法确认最新状态。")
+                if total is not None and len(rows) > total:
+                    raise APIError("AutoDL 市场分页数量超出预期，本轮结果未采用。")
+                if not page or has_more is False or (total is not None and len(rows) == total):
+                    if (total is not None and len(rows) != total) or has_more is True:
+                        raise APIError("AutoDL 市场分页未完整结束，本轮结果未采用。")
+                    # Drop credentials and instance UUIDs even if the internal
+                    # API unexpectedly adds them to a future market response.
+                    result.extend({key: row[key] for key in self.MARKET_FIELDS if key in row} for row in rows)
+                    break
+            else:
+                raise APIError("AutoDL 市场分页超过安全上限，未返回不完整列表。")
+        return result
 
     def start_instance(self, instance_uuid: str) -> None:
         """Submit one ordinary-container GPU start; success means accepted only.
@@ -304,7 +382,7 @@ class AutoDLClient:
         raise APIError(f"AutoDL 请求返回 HTTP {status}，本轮结果未采用。") from None
 
     @staticmethod
-    def _unpack(payload: dict, page_index: int) -> tuple[list[dict], int | None, bool | None]:
+    def _unpack(payload: dict, page_index: int, subject: str = "实例") -> tuple[list[dict], int | None, bool | None]:
         data = payload.get("data")
         metadata = data if isinstance(data, dict) else {}
         if isinstance(data, list):
@@ -312,12 +390,12 @@ class AutoDLClient:
         elif isinstance(data, dict):
             candidates = [data[key] for key in ("list", "result") if key in data]
             if len(candidates) != 1:
-                raise APIError("AutoDL 实例列表字段缺失或有歧义，本轮结果未采用。")
+                raise APIError(f"AutoDL {subject}列表字段缺失或有歧义，本轮结果未采用。")
             rows = candidates[0]
         else:
-            raise APIError("AutoDL 实例列表结构无效，本轮结果未采用。")
+            raise APIError(f"AutoDL {subject}列表结构无效，本轮结果未采用。")
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-            raise APIError("AutoDL 实例列表包含无效记录，本轮结果未采用。")
+            raise APIError(f"AutoDL {subject}列表包含无效记录，本轮结果未采用。")
         totals = []
         for source in (metadata, payload):
             for key in ("result_total", "total", "total_count"):
@@ -432,6 +510,52 @@ def instance_start_status(instance_uuid: str, rows: list[dict]) -> str:
     if row.get("status") == "shutdown":
         return "shutdown"
     return "unknown"
+
+
+def evaluate_machine(target: Target, rows: list[dict]) -> Observation:
+    """Evaluate public-market availability, separately from owned instances.
+
+    The official market UI (index.f21001d3.js, verified 2026-10-05) shows
+    zero rentable GPUs for on_line 3/4/5/6 or an exhausted instance quota,
+    even when the underlying gpu_idle_num is positive. Unknown future state
+    values and incomplete counts never generate availability notifications.
+    """
+    label = "机器 " + _display(target.value)
+    required = _integer(target.min_gpus)
+
+    def observation(available: bool | None, detail: str, idle: int | None = None) -> Observation:
+        return Observation(target.key, label, available, idle, required, detail)
+
+    if target.kind != "machine":
+        return observation(None, "市场查询只支持机器 ID。")
+    if required is None or required == 0:
+        return observation(None, "机器监控需要设置正整数 GPU 需求。")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return observation(None, "市场主机列表结构无效。")
+    matches = [row for row in rows if _identifier(row.get("machine_id")) == target.value]
+    if not matches:
+        return observation(None, "市场中未找到该机器 ID，或该主机暂不可见。")
+    if len(matches) != 1:
+        return observation(None, "同一机器有重复或冲突的市场记录，等待下次查询。")
+    row = matches[0]
+    names = [row.get("region_name"), row.get("machine_alias")]
+    display_names = [_display(name) for name in names if isinstance(name, str) and name.strip()]
+    if display_names:
+        label = " / ".join(display_names) + "（" + _display(target.value) + "）"
+    idle, total = _integer(row.get("gpu_idle_num")), _integer(row.get("gpu_number"))
+    online = _integer(row.get("on_line"))
+    maximum, bound = _integer(row.get("max_instance_num")), _integer(row.get("binding_instance_num"))
+    if idle is None or total is None or total == 0 or idle > total:
+        return observation(None, "市场空闲 GPU 或总量数据缺失、无效。")
+    if online is None or online not in range(7):
+        return observation(None, "市场主机的可租用状态未知。")
+    if maximum is None or bound is None or bound > maximum:
+        return observation(None, "市场主机的实例名额数据缺失、无效。")
+    if online in (3, 4, 5, 6):
+        return observation(False, "该主机当前在市场不可租用，可租 GPU 为 0 张。", 0)
+    if maximum == bound:
+        return observation(False, "该主机的实例名额已满，可租 GPU 为 0 张。", 0)
+    return observation(idle >= required, f"市场可租 {idle} 张，需要 {required} 张。", idle)
 
 
 def evaluate_target(target: Target, rows: list[dict]) -> Observation:

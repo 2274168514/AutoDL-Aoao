@@ -54,14 +54,14 @@ class EmailNotifier:
                     "",
                 ]
             )
-        lines.extend(
-            [
-                f"检测时间（UTC）：{datetime.now(timezone.utc).isoformat(timespec='seconds')}",
-                "请到 AutoDL 控制台核实并手动开机：",
-                "https://www.autodl.com/console/instance/list",
-                "空闲状态可能随时变化。此邮件只代表空闲检测结果，不代表实例已开机。",
-            ]
-        )
+        lines.append(f"检测时间（UTC）：{datetime.now(timezone.utc).isoformat(timespec='seconds')}")
+        if any(item.target_key.startswith("instance:") for item in available):
+            lines.extend(["实例目标请到 AutoDL 控制台核实并手动开机：",
+                          "https://www.autodl.com/console/instance/list"])
+        if any(item.target_key.startswith("machine:") for item in available):
+            lines.extend(["主机目标请到算力市场核实并创建实例：",
+                          "https://www.autodl.com/machine/list"])
+        lines.append("空闲状态可能随时变化。此邮件只代表空闲检测结果，不代表已创建实例或已开机。")
         self._send(f"AutoDL Aoao GPU 可用提醒（{len(available)} 个目标）", "\n".join(lines))
 
     def send_auto_started(self, instance_uuid: str, label: str) -> None:

@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from .api import (
     APIError, AuthenticationError, Observation, RateLimitError, StartRejectedError,
-    evaluate_target, instance_start_status, resolve_start_candidate,
+    evaluate_machine, evaluate_target, instance_start_status, resolve_start_candidate,
 )
 from .config import Config
 from .notifier import MailError
@@ -448,12 +448,37 @@ class Monitor:
         """Fetch once; query-only checks never change notification state."""
         with self._check_lock:
             self._apply_pending_update()
+            if self.stop_event.is_set():
+                return []
             if notify and self._halted:
                 raise StateError("本次运行的通知状态保存曾失败，已停止发送；请修复后重启。")
             if notify and self._state is None:
                 self._state = self.store.load()
-            rows = self.client.fetch_instances()
-            observations = [evaluate_target(target, rows) for target in self.config.targets]
+            # Market rows describe machines available to rent, never instances
+            # that this account may start. Keep the two snapshots separate.
+            rows = self.client.fetch_instances() if any(target.kind == "instance" for target in self.config.targets) else []
+            if self.stop_event.is_set():
+                return []
+            machine_ids = list(dict.fromkeys(target.value for target in self.config.targets if target.kind == "machine"))
+            machine_rows = []
+            market_error = None
+            if machine_ids:
+                try:
+                    machine_rows = self.client.fetch_machines(machine_ids)
+                except (AuthenticationError, RateLimitError):
+                    # Preserve permission failures and Retry-After unchanged.
+                    raise
+                except APIError as error:
+                    market_error = error
+            observations = []
+            for target in self.config.targets:
+                if target.kind == "machine":
+                    item = evaluate_machine(target, machine_rows)
+                    if market_error is not None:
+                        item = replace(item, available=None, idle_gpus=None, detail="市场查询失败，暂时无法确认空闲 GPU；将稍后重试。")
+                else:
+                    item = evaluate_target(target, rows)
+                observations.append(item)
             if self.on_observations is not None:
                 self.on_observations(observations)
             for item in observations:
@@ -461,11 +486,19 @@ class Monitor:
                 idle = "?" if item.idle_gpus is None else str(item.idle_gpus)
                 required = "?" if item.required_gpus is None else str(item.required_gpus)
                 self.log(f"{status} | {_compact(item.label)} | 空闲 {idle} / 需要 {required} | {_compact(item.detail)}")
-            if not notify:
+            if not notify or self.stop_event.is_set():
+                return observations
+
+            def completed() -> list[Observation]:
+                # A market outage must not discard valid instance notifications.
+                # Raise only after their state commits, then use the existing
+                # polling backoff. Query-only callers receive unknown rows.
+                if market_error is not None:
+                    raise market_error
                 return observations
 
             if self._check_auto_start(rows):
-                return observations
+                return completed()
 
             state = self._state
             assert state is not None
@@ -495,6 +528,8 @@ class Monitor:
             if changed or pending:
                 self._save_state()
             if not pending:
+                return completed()
+            if self.stop_event.is_set():
                 return observations
             self.notifier.send_available(pending)
             sent_at = time.time()
@@ -508,7 +543,7 @@ class Monitor:
                     "请检查磁盘和状态文件；直接重启可能再次发送。"
                 ) from error
             self.log(f"已发送 {len(pending)} 个可用目标的合并提醒。")
-            return observations
+            return completed()
 
     def _save_state(self) -> None:
         assert self._state is not None
